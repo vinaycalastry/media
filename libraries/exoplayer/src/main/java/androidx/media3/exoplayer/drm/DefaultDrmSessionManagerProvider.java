@@ -26,6 +26,7 @@ import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.datasource.HttpDataSource;
 import com.google.common.primitives.Ints;
 import java.util.Map;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
@@ -94,11 +95,12 @@ public final class DefaultDrmSessionManagerProvider implements DrmSessionManager
         drmHttpDataSourceFactory != null
             ? drmHttpDataSourceFactory
             : new DefaultHttpDataSource.Factory().setUserAgent(userAgent);
-    HttpMediaDrmCallback httpDrmCallback =
-        new HttpMediaDrmCallback(
+
+    DrmTodayWidevineCallback httpDrmCallback =
+        new DrmTodayWidevineCallback(
             drmConfiguration.licenseUri == null ? null : drmConfiguration.licenseUri.toString(),
             drmConfiguration.forceDefaultLicenseUri,
-            dataSourceFactory);
+            (HttpDataSource.Factory) dataSourceFactory);
     for (Map.Entry<String, String> entry : drmConfiguration.licenseRequestHeaders.entrySet()) {
       httpDrmCallback.setKeyRequestProperty(entry.getKey(), entry.getValue());
     }
