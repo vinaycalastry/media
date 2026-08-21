@@ -25,7 +25,6 @@ import androidx.media3.common.util.UnstableApi;
 import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy;
-import androidx.media3.datasource.HttpDataSource;
 import com.google.common.primitives.Ints;
 import java.util.Map;
 import java.util.Objects;
@@ -52,7 +51,7 @@ public final class DefaultDrmSessionManagerProvider implements DrmSessionManager
   }
 
   /**
-   * Sets the {@link DataSource.Factory} which is used to create {@link HttpMediaDrmCallback}
+   * Sets the {@link DataSource.Factory} which is used to create {@link DrmTodayWidevineCallback}
    * instances. If {@code null} is passed a {@link DefaultHttpDataSource.Factory} is used.
    *
    * @param drmDataSourceFactory The data source factory or {@code null} to use {@link
@@ -112,7 +111,7 @@ public final class DefaultDrmSessionManagerProvider implements DrmSessionManager
         new DrmTodayWidevineCallback(
             drmConfiguration.licenseUri == null ? null : drmConfiguration.licenseUri.toString(),
             drmConfiguration.forceDefaultLicenseUri,
-            (HttpDataSource.Factory) dataSourceFactory);
+            dataSourceFactory);
     for (Map.Entry<String, String> entry : drmConfiguration.licenseRequestHeaders.entrySet()) {
       httpDrmCallback.setKeyRequestProperty(entry.getKey(), entry.getValue());
     }

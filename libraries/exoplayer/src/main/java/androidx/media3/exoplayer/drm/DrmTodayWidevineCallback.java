@@ -16,6 +16,8 @@
 
 package androidx.media3.exoplayer.drm;
 
+import static androidx.media3.exoplayer.drm.DrmUtil.executePost;
+
 import android.net.Uri;
 import android.text.TextUtils;
 import android.util.Base64;
@@ -24,48 +26,33 @@ import androidx.media3.common.C;
 import androidx.media3.common.util.Assertions;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
-import androidx.media3.datasource.DataSourceInputStream;
+import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DataSpec;
-import androidx.media3.datasource.HttpDataSource;
-import androidx.media3.datasource.StatsDataSource;
+import androidx.media3.exoplayer.drm.ExoMediaDrm.KeyRequest;
+import androidx.media3.exoplayer.drm.ExoMediaDrm.ProvisionRequest;
 import com.google.common.collect.ImmutableMap;
-import java.util.Collections;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-/** A {@link MediaDrmCallback} that makes requests using {@link HttpDataSource} instances. */
-@UnstableApi public final class DrmTodayWidevineCallback implements MediaDrmCallback {
-  /**
-   * Logger tag for this class
-   */
-  private static final String TAG = "DrmCallback";
+/**
+ * A {@link MediaDrmCallback} that makes requests using {@link DataSource} instances, and unwraps
+ * castLabs DRMtoday Widevine license responses.
+ *
+ * <p>DRMtoday returns Widevine licenses wrapped in a JSON envelope of the form {@code
+ * {"license":"<base64>"}} rather than as raw license bytes. This callback transparently unwraps that
+ * envelope. Responses that are not a DRMtoday envelope are passed through unchanged, so this
+ * callback also works against standard Widevine license servers.
+ */
+@UnstableApi
+public final class DrmTodayWidevineCallback implements MediaDrmCallback {
 
-  /**
-   * The assetId of the requested asset.
-   */
-  private static final String DRMTODAY_ASSET_ID_PARAM = "assetId";
-  /**
-   * (optional) The variantId of the requested asset. If no variantId is used for identifying the asset, leave out the Query parameter.
-   */
-  private static final String DRMTODAY_VARIANT_ID_PARAM = "variantId";
-  /**
-   * Debug purposes.
-   */
-  private static final String DRMTODAY_LOG_REQUEST_ID_PARAM = "logRequestId";
-  /**
-   * All DRM Today calls use a random request Id that helps checking the request on the server.
-   * Print this request id on all logs when possible.
-   * This parameter should be generated and not manually set.
-   */
-  private static final int REQUEST_ID_SIZE = 16;
+  /** The name of the JSON field holding the base64-encoded license in a DRMtoday response. */
+  private static final String DRMTODAY_LICENSE_FIELD = "license";
 
-  private static final int MAX_MANUAL_REDIRECTS = 5;
-
-  private final HttpDataSource.Factory dataSourceFactory;
+  private final DataSource.Factory dataSourceFactory;
   @Nullable private final String defaultLicenseUrl;
   private final boolean forceDefaultLicenseUrl;
   private final Map<String, String> keyRequestProperties;
@@ -74,10 +61,11 @@ import org.json.JSONObject;
    * @param defaultLicenseUrl The default license URL. Used for key requests that do not specify
    *     their own license URL. May be {@code null} if it's known that all key requests will specify
    *     their own URLs.
-   * @param dataSourceFactory A factory from which to obtain {@link HttpDataSource} instances.
+   * @param dataSourceFactory A factory from which to obtain {@link DataSource} instances. This will
+   *     usually be an HTTP-based {@link DataSource}.
    */
   public DrmTodayWidevineCallback(
-      @Nullable String defaultLicenseUrl, HttpDataSource.Factory dataSourceFactory) {
+      @Nullable String defaultLicenseUrl, DataSource.Factory dataSourceFactory) {
     this(defaultLicenseUrl, /* forceDefaultLicenseUrl= */ false, dataSourceFactory);
   }
 
@@ -88,12 +76,13 @@ import org.json.JSONObject;
    *     known that all key requests will specify their own URLs.
    * @param forceDefaultLicenseUrl Whether to force use of {@code defaultLicenseUrl} for key
    *     requests that include their own license URL.
-   * @param dataSourceFactory A factory from which to obtain {@link HttpDataSource} instances.
+   * @param dataSourceFactory A factory from which to obtain {@link DataSource} instances. This will
+   *     usually be an HTTP-based {@link DataSource}.
    */
   public DrmTodayWidevineCallback(
       @Nullable String defaultLicenseUrl,
       boolean forceDefaultLicenseUrl,
-      HttpDataSource.Factory dataSourceFactory) {
+      DataSource.Factory dataSourceFactory) {
     Assertions.checkArgument(!(forceDefaultLicenseUrl && TextUtils.isEmpty(defaultLicenseUrl)));
     this.dataSourceFactory = dataSourceFactory;
     this.defaultLicenseUrl = defaultLicenseUrl;
@@ -127,9 +116,7 @@ import org.json.JSONObject;
     }
   }
 
-  /**
-   * Clears all headers for key requests made by the callback.
-   */
+  /** Clears all headers for key requests made by the callback. */
   public void clearAllKeyRequestProperties() {
     synchronized (keyRequestProperties) {
       keyRequestProperties.clear();
@@ -137,19 +124,20 @@ import org.json.JSONObject;
   }
 
   @Override
-  public byte[] executeProvisionRequest(UUID uuid, ExoMediaDrm.ProvisionRequest request)
+  public Response executeProvisionRequest(UUID uuid, ProvisionRequest request)
       throws MediaDrmCallbackException {
     String url =
         request.getDefaultUrl() + "&signedRequest=" + Util.fromUtf8Bytes(request.getData());
     return executePost(
-        dataSourceFactory,
+        dataSourceFactory.createDataSource(),
         url,
         /* httpBody= */ null,
-        /* requestProperties= */ Collections.emptyMap());
+        /* requestProperties= */ ImmutableMap.of());
   }
 
   @Override
-  public byte[] executeKeyRequest(UUID uuid, ExoMediaDrm.KeyRequest request) throws MediaDrmCallbackException {
+  public Response executeKeyRequest(UUID uuid, KeyRequest request)
+      throws MediaDrmCallbackException {
     String url = request.getLicenseServerUrl();
     if (forceDefaultLicenseUrl || TextUtils.isEmpty(url)) {
       url = defaultLicenseUrl;
@@ -164,91 +152,72 @@ import org.json.JSONObject;
     }
     Map<String, String> requestProperties = new HashMap<>();
     // Add standard request properties for supported schemes.
-    String contentType = C.PLAYREADY_UUID.equals(uuid) ? "text/xml"
-        : (C.CLEARKEY_UUID.equals(uuid) ? "application/json" : "application/octet-stream");
+    String contentType =
+        C.PLAYREADY_UUID.equals(uuid)
+            ? "text/xml"
+            : (C.CLEARKEY_UUID.equals(uuid) ? "application/json" : "application/octet-stream");
     requestProperties.put("Content-Type", contentType);
     if (C.PLAYREADY_UUID.equals(uuid)) {
-      requestProperties.put("SOAPAction",
-          "http://schemas.microsoft.com/DRM/2007/03/protocols/AcquireLicense");
+      requestProperties.put(
+          "SOAPAction", "http://schemas.microsoft.com/DRM/2007/03/protocols/AcquireLicense");
     }
     // Add additional request properties.
     synchronized (keyRequestProperties) {
       requestProperties.putAll(keyRequestProperties);
     }
-    final byte[] bytes;
-    try {
-      bytes = executePost(dataSourceFactory, url, request.getData(), requestProperties);
-    } catch (MediaDrmCallbackException e) {
-      throw e;
+    Response response =
+        executePost(
+            dataSourceFactory.createDataSource(),
+            url,
+            /* httpBody= */ request.getData(),
+            requestProperties);
+    if (!C.WIDEVINE_UUID.equals(uuid)) {
+      // Only Widevine responses are wrapped in a DRMtoday envelope. PlayReady responses are XML and
+      // ClearKey responses are already in the format expected by the framework.
+      return response;
     }
-
-    try {
-      JSONObject jsonObject = new JSONObject(new String(bytes));
-      return Base64.decode(jsonObject.getString("license"), Base64.DEFAULT);
-    } catch (JSONException e) {
-      throw new RuntimeException("Error while parsing response", e);
-    }
+    return maybeUnwrapDrmTodayLicense(response, url);
   }
 
-  private static byte[] executePost(
-      HttpDataSource.Factory dataSourceFactory,
-      String url,
-      @Nullable byte[] httpBody,
-      Map<String, String> requestProperties)
+  /**
+   * Unwraps a DRMtoday {@code {"license":"<base64>"}} envelope, returning {@code response} unchanged
+   * if it isn't such an envelope.
+   *
+   * @param response The response from the license server.
+   * @param url The license URL the response was obtained from, used for error reporting.
+   * @return A {@link Response} holding the raw license bytes.
+   * @throws MediaDrmCallbackException If a DRMtoday envelope was found but its license could not be
+   *     decoded.
+   */
+  private static Response maybeUnwrapDrmTodayLicense(Response response, String url)
       throws MediaDrmCallbackException {
-    StatsDataSource dataSource = new StatsDataSource(dataSourceFactory.createDataSource());
-    int manualRedirectCount = 0;
-    DataSpec dataSpec =
-        new DataSpec.Builder()
-            .setUri(url)
-            .setHttpRequestHeaders(requestProperties)
-            .setHttpMethod(DataSpec.HTTP_METHOD_POST)
-            .setHttpBody(httpBody)
-            .setFlags(DataSpec.FLAG_ALLOW_GZIP)
-            .build();
-    DataSpec originalDataSpec = dataSpec;
+    String licenseBase64;
     try {
-      while (true) {
-        DataSourceInputStream inputStream = new DataSourceInputStream(dataSource, dataSpec);
-        try {
-          return Util.toByteArray(inputStream);
-        } catch (HttpDataSource.InvalidResponseCodeException e) {
-          @Nullable String redirectUrl = getRedirectUrl(e, manualRedirectCount);
-          if (redirectUrl == null) {
-            throw e;
-          }
-          manualRedirectCount++;
-          dataSpec = dataSpec.buildUpon().setUri(redirectUrl).build();
-        } finally {
-          Util.closeQuietly(inputStream);
-        }
+      JSONObject jsonObject = new JSONObject(Util.fromUtf8Bytes(response.data));
+      if (!jsonObject.has(DRMTODAY_LICENSE_FIELD)) {
+        // A JSON body without a license field isn't a DRMtoday envelope. Pass it through.
+        return response;
       }
-    } catch (Exception e) {
+      licenseBase64 = jsonObject.getString(DRMTODAY_LICENSE_FIELD);
+    } catch (JSONException e) {
+      // Not JSON at all, so these are raw license bytes from a non-DRMtoday license server.
+      return response;
+    }
+    byte[] license;
+    try {
+      license = Base64.decode(licenseBase64, Base64.DEFAULT);
+    } catch (IllegalArgumentException e) {
       throw new MediaDrmCallbackException(
-          originalDataSpec,
-          Assertions.checkNotNull(dataSource.getLastOpenedUri()),
-          dataSource.getResponseHeaders(),
-          dataSource.getBytesRead(),
+          new DataSpec.Builder().setUri(url).build(),
+          Uri.parse(url),
+          /* responseHeaders= */ ImmutableMap.of(),
+          /* bytesLoaded= */ response.data.length,
           /* cause= */ e);
     }
-  }
-
-  @Nullable
-  private static String getRedirectUrl(
-      HttpDataSource.InvalidResponseCodeException exception, int manualRedirectCount) {
-    // For POST requests, the underlying network stack will not normally follow 307 or 308
-    // redirects automatically. Do so manually here.
-    boolean manuallyRedirect =
-        (exception.responseCode == 307 || exception.responseCode == 308)
-            && manualRedirectCount < MAX_MANUAL_REDIRECTS;
-    if (!manuallyRedirect) {
-      return null;
+    Response.Builder builder = new Response.Builder(license);
+    if (response.loadEventInfo != null) {
+      builder.setLoadEventInfo(response.loadEventInfo);
     }
-    Map<String, List<String>> headerFields = exception.headerFields;
-    @Nullable List<String> locationHeaders = headerFields.get("Location");
-    if (locationHeaders != null && !locationHeaders.isEmpty()) {
-      return locationHeaders.get(0);
-    }
-    return null;
+    return builder.build();
   }
 }
